@@ -58,7 +58,8 @@ cgm = []
 
 max_episodes = 800
 max_steps = 72
-batch_size = 32
+buffer_size = 20
+batch_size = 16
 
 # Initialize memory
 step_list = []
@@ -142,6 +143,26 @@ class DQN(nn.Module):
             return self.layer(x)
       
 
+class OracleQ(nn.Module):
+      def __init__(self, state_space, action_sapce):
+            super(OracleQ, self).__init__()
+            
+            self.fc1 = nn.Sequential(
+                        nn.Linear(state_space,256),
+                        nn.BatchNorm1d(256),
+                        nn.ReLU()
+                        )
+            
+            self.fc2 = nn.Sequential(
+                        nn.Linear(256, action_space),
+                        nn.BatchNorm1d(action_space),
+                        nn.ReLU()
+                        )
+            
+      def forward(self, x):
+            fc1 = self.fc1(x)
+            return self.fc2(fc1)
+
 
 #%%
 
@@ -216,7 +237,7 @@ def train(episodes, steps, epsilon):
       for epi in range(episodes):
             # Initiliaze state
             state = db.reset()
-            #state = db.reset()
+            
             # Reward sum, loss sum and time steps reset
             reward_all = 0
             t = 0
@@ -273,7 +294,7 @@ train(max_episodes, max_steps, eps_init)
 #-------------------------
 ## SAVE TRAINED MODEL PARAMETERS ##
 
-filepath = './Documents/Python/Network parameters/checkpoint_hc.pth'
+filepath = './Documents/Python/Network parameters/checkpoint_hc2.pth'
 
 th.save(model.state_dict(), filepath)
 
@@ -365,13 +386,154 @@ plt.ylabel('Chance of Random Action')
 
 
 
+#----------------------#
+##¤¤ ORACLE Q BELOW ##¤¤
+#----------------------#
+
+#%%
+#---------------------------
+## ORACLE Q DQN - TRAINER ##
+
+model = OracleQ(state_space, action_space)
+model_target = OracleQ(state_space, action_space)
+
+loss = nn.MSELoss()
+optimizer = optim.Adam(params = model.parameters(), lr = learning_rate)
+
+buffer = ReplayBuffer(buffer_size)
+
+# Action selection function
+def choose_action(Q, epsilon):
+      # Random action selecction
+      if np.random.uniform() < epsilon:
+            return db.action_space.sample()
+      # Greedy action selection
+      else:
+            
+            action = np.argmax(Q.detach().numpy())
+            return action
+
+
+# Learning function. Returns loss 
+def learn(Q, batch_size, gamma):
+      cs_batch, a_batch, r_batch, d_batch, ns_batch = buffer.sample(batch_size)
+      
+      Q_new = model_target(th.from_numpy(ns_batch).float())
+      maxQ_new = th.max(Q_new.data)
+      
+      Q_target = model_target(th.from_numpy(cs_batch).float())
+      for b in range(batch_size):
+            Q_target[b, a_batch[b]] = r_batch[b]
+      
+            if d_batch[b] == False:
+                  Q_target[b, a_batch[b]] += gamma * maxQ_new
+      
+      train_loss = loss(Q, Q_target)
+      
+      # Minimize the loss and backpropagate
+      optimizer.zero_grad()
+      train_loss.backward()
+      optimizer.step()
+      
+      return train_loss
+
+
+# Agent training function
+def train(episodes, steps, batch_size, epsilon):
+      
+      # Episode loop
+      for epi in range(episodes):
+            # Initialize state
+            state = buffer.sample(batch_size)[0]
+            
+            # Reward sum, loss sum and time steps reset
+            reward_all = 0
+            t = 0
+            
+            # Time step loop
+            while t < steps:
+                  Q = model(th.from_numpy(state).float())
+                  
+                  action = choose_action(Q, epsilon)
+                  
+                  next_state, reward, done, _ = db.step(action)
+                  
+                  buffer.add(state[0], action, reward, done, next_state)
+                  
+                  train_loss = learn(Q, batch_size, gamma)
+                  
+                  # Reward sum
+                  reward_all += reward
+                  # Updating current state
+                  state = next_state
+                  # Incrementing time steps
+                  t += 1
+                  
+                  # Break loop if done equals true
+                  if done:
+                        break
+            
+            # Update epsilon
+            epsilon = max(eps_end, eps_decay * epsilon)
+            
+            # Update target network
+            if epi % 10 == 0:
+                  target_update(model, model_target, sigma)
+            
+            # Save time steps, reward, loss and epsilon into lists
+            step_list.append(t)
+            reward_list.append(reward_all)
+            #loss_list.append(l/t)
+            epsilon_list.append(epsilon)
+            
+            if epi % 100 == 0:
+                  print('Episode: {}'.format(epi))
+
+#%%
+#-------------------------
+## FILL UP THE BUFFER WITH RANDOM TRANSITIONS ##
+
+while buffer.size() < buffer_size:
+      state = db.reset();
+      action = db.action_space.sample();
+      next_state, reward, done, _ = db.step(action);
+      
+      buffer.add(state, action, reward, done, next_state)
+      
+
+#%%
+      
+train(max_episodes, max_steps, batch_size, eps_init)
 
 
 
 
+#%%
+## TESTING GROUNDS ##
+
+cs_batch = buffer.sample(batch_size)[0]
+
+Q = model(th.from_numpy(cs_batch).float())
+
+action = choose_action(Q, 0.9)
+
+next_state, reward, done, _ = db.step(action)
+
+buffer.add(state, action, reward, done, next_state)
+
+train_loss = learn(Q, batch_size, gamma)
 
 
+#%%
 
+for i in range(max_episodes):
+      state = buffer.sample(batch_size)[0]
+      
+      t = 0
+      while t < max_steps:
+            Q = model(th.from_numpy(state).float())
+           
+            t += 1
 
 
 
