@@ -32,7 +32,7 @@ plt.ion()
 
 
 #%%
-#------------------------- 
+#-------------------------
 ## CREATE ENVIRONMENT ##
 
 from gym.envs.diabetes.hovorka_model import hovorka_parameters
@@ -58,8 +58,8 @@ cgm = []
 
 max_episodes = 800
 max_steps = 72
-buffer_size = 20
-batch_size = 16
+buffer_size = 10000
+batch_size = 32
 
 # Initialize memory
 step_list = []
@@ -71,7 +71,7 @@ action_list = []
 state_space = db.observation_space.shape[0]
 action_space = db.action_space.n
 
-learning_rate = 0.01
+learning_rate = 0.001
 
 db.reset()
 
@@ -214,6 +214,51 @@ def learn(batch_size, gamma):
       optimizer.step()
       
       return train_loss
+
+def learn_new(batch_size, gamma, DDQ_learning):
+      if buffer.size() < batch_size:
+            return
+      
+      cs_batch, a_batch, r_batch, d_batch, ns_batch = buffer.sample(batch_size)
+      
+      cs_batch = th.from_numpy(cs_batch).float()
+      ns_batch = th.from_numpy(ns_batch).float()
+      
+      Q_target = th.zeros((batch_size, action_space))
+      
+      if not DDQ_learning:
+            for b in range(batch_size):
+                  Q_new = model_target(ns_batch[b])
+                  maxQ_new = th.max(Q_new.data)
+            
+                  Q_target[b] = model_target(cs_batch[b])
+                  Q_target[b, a_batch[b]] = r_batch[b]
+            
+                  if d_batch[b] == False:
+                        Q_target[b, a_batch[b]] += gamma * maxQ_new
+            
+      else:
+            for b in range(batch_size):
+                  Q_new = model(ns_batch[b])
+                  action_best = np.argmax(Q_new.data.numpy())
+            
+                  Q_target_next = model_target(ns_batch[b])
+            
+                  Q_target[b] = model_target(cs_batch[b])
+                  Q_target[b, a_batch[b]] = r_batch[b]
+            
+                  if d_batch[b] == False:
+                        Q_target[b, a_batch[b]] += gamma * Q_target_next[action_best]
+      
+      Q_batch = model(cs_batch)
+      
+      train_loss = loss(Q_batch, Q_target)
+      
+      optimizer.zero_grad()
+      train_loss.backward()
+      optimizer.step()
+      
+      return train_loss
       
 # Target network update function
 def target_update(QNet_local, QNet_target, sigma):
@@ -231,7 +276,7 @@ def target_update(QNet_local, QNet_target, sigma):
             theta_target.data.copy_(theta_transformed)      
       
 # Agent training function
-def train(episodes, steps, epsilon):
+def train(episodes, steps, epsilon, DDQ_learning):
       
       # Episode loop
       for epi in range(episodes):
@@ -255,7 +300,7 @@ def train(episodes, steps, epsilon):
                   buffer.add(state, action, reward, done, next_state)
                   
                   # Training loss
-                  train_loss = learn(batch_size, gamma)
+                  train_loss = learn_new(batch_size, gamma, DDQ_learning)
                   
                   # Reward sum
                   reward_all += reward
@@ -272,8 +317,7 @@ def train(episodes, steps, epsilon):
             epsilon = max(eps_end, eps_decay * epsilon)
             
             # Update target network
-            if epi % 10 == 0:
-                  target_update(model, model_target, sigma)
+            target_update(model, model_target, sigma)
             
             # Save time steps, reward, loss and epsilon into lists
             step_list.append(t)
@@ -287,14 +331,14 @@ def train(episodes, steps, epsilon):
 
 #%%
 
-train(max_episodes, max_steps, eps_init)
+train(max_episodes, max_steps, eps_init, True)
 
 
 #%%
 #-------------------------
 ## SAVE TRAINED MODEL PARAMETERS ##
 
-filepath = './Documents/Python/Network parameters/checkpoint_hc2.pth'
+filepath = './Documents/Python/Network parameters/checkpoint_hc_test.pth'
 
 th.save(model.state_dict(), filepath)
 
@@ -331,7 +375,7 @@ model.load_state_dict(th.load(filepath))
 
 db_test.reset();
 state = db_test.reset()
-
+model.eval()
 for i in range(72):
       q = model(th.from_numpy(state).float())
       a = choose_action(q,0)
@@ -438,13 +482,29 @@ def learn(Q, batch_size, gamma):
       return train_loss
 
 
+# Target network update function
+def target_update(QNet_local, QNet_target, sigma):
+      # Store parameters from both networks in a list
+      theta = zip(QNet_local.parameters(), QNet_target.parameters())
+            
+      # Iterate through all the parameters in the list
+      # and update the target weights according to:
+      # θ_target = τ*θ_local + (1 - τ)*θ_target
+      for theta_local, theta_target in theta:
+            thetaL_transformed = sigma * theta_local
+            thetaT_transformed = (1.0 - sigma) * theta_target
+            theta_transformed = thetaL_transformed + thetaT_transformed
+            
+            theta_target.data.copy_(theta_transformed) 
+
+
 # Agent training function
 def train(episodes, steps, batch_size, epsilon):
       
       # Episode loop
       for epi in range(episodes):
             # Initialize state
-            state = buffer.sample(batch_size)[0]
+            state = db.reset()
             
             # Reward sum, loss sum and time steps reset
             reward_all = 0
@@ -452,14 +512,20 @@ def train(episodes, steps, batch_size, epsilon):
             
             # Time step loop
             while t < steps:
-                  Q = model(th.from_numpy(state).float())
+                  state_fillers = buffer.sample(batch_size-1)[0]
+                  state_samples = np.vstack((state, state_fillers))
+                  
+                  model.eval()
+                  Q_samples = model(th.from_numpy(state_samples).float())
+                  Q = Q_samples[0]
                   
                   action = choose_action(Q, epsilon)
                   
                   next_state, reward, done, _ = db.step(action)
                   
-                  buffer.add(state[0], action, reward, done, next_state)
+                  buffer.add(state, action, reward, done, next_state)
                   
+                  model.train()
                   train_loss = learn(Q, batch_size, gamma)
                   
                   # Reward sum
@@ -477,8 +543,7 @@ def train(episodes, steps, batch_size, epsilon):
             epsilon = max(eps_end, eps_decay * epsilon)
             
             # Update target network
-            if epi % 10 == 0:
-                  target_update(model, model_target, sigma)
+            target_update(model, model_target, sigma)
             
             # Save time steps, reward, loss and epsilon into lists
             step_list.append(t)
@@ -488,16 +553,21 @@ def train(episodes, steps, batch_size, epsilon):
             
             if epi % 100 == 0:
                   print('Episode: {}'.format(epi))
+            
+            if epi % 10 == 0:
+                  print('Average reward: {}'.format(np.mean(reward_list)))
 
 #%%
 #-------------------------
 ## FILL UP THE BUFFER WITH RANDOM TRANSITIONS ##
-
+                  
+state = db.reset();
 while buffer.size() < buffer_size:
-      state = db.reset();
       action = db.action_space.sample();
       next_state, reward, done, _ = db.step(action);
-      
+      state = next_state;
+      if done:
+            db.reset();
       buffer.add(state, action, reward, done, next_state)
       
 
@@ -511,34 +581,45 @@ train(max_episodes, max_steps, batch_size, eps_init)
 #%%
 ## TESTING GROUNDS ##
 
-cs_batch = buffer.sample(batch_size)[0]
+db_test.reset();
+state = db_test.reset()
+model.eval()
+for i in range(72):
+      q = model(th.from_numpy(np.atleast_2d(state)).float())
+      a = choose_action(q,0)
+      action_list.append(a)
+      
+      s,r,d,i = db_test.step(a)
+      
+      
 
-Q = model(th.from_numpy(cs_batch).float())
+db_test.render()
+plt.title('Blood Glucose over Time')
+plt.xlabel('Time')
+plt.ylabel('Blood glucose')
 
-action = choose_action(Q, 0.9)
-
-next_state, reward, done, _ = db.step(action)
-
-buffer.add(state, action, reward, done, next_state)
-
-train_loss = learn(Q, batch_size, gamma)
 
 
 #%%
 
-for i in range(max_episodes):
-      state = buffer.sample(batch_size)[0]
+cs_batch, a_batch, r_batch, d_batch, ns_batch = buffer.sample(batch_size)
+
+cs_batch = th.from_numpy(cs_batch).float()
+ns_batch = th.from_numpy(ns_batch).float()
       
-      t = 0
-      while t < max_steps:
-            Q = model(th.from_numpy(state).float())
-           
-            t += 1
+Q_target = th.zeros((batch_size, action_space))
 
-
-
-
-
+for b in range(batch_size):
+      Q_new = model(ns_batch[b])
+      action_best = np.argmax(Q_new.data.numpy())
+            
+      Q_target_next = model_target(ns_batch[b])
+            
+      Q_target[b] = model_target(cs_batch[b])
+      Q_target[b, a_batch[b]] = r_batch[b]
+            
+      if d_batch[b] == False:
+            Q_target[b, a_batch[b]] += gamma * Q_target_next[action_best]
 
 
 
