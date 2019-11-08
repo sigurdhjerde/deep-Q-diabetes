@@ -13,7 +13,7 @@ from collections import deque
 import torch as th
 import torch.nn as nn
 import torch.optim as optim
-import torch.functional as F
+import torch.nn.functional as F
 import torchvision.transforms as T
 from torch.autograd import Variable
 
@@ -38,7 +38,10 @@ plt.ion()
 from gym.envs.diabetes.hovorka_model import hovorka_parameters
 
 db = gym.make('HovorkaCambridge-v0')
+#db = gym.make('CartPole-v0')
 db_test = gym.make('HovorkaCambridge-v0')
+#db_test = gym.make('CartPole-v0')
+
 
 
 #%%
@@ -46,10 +49,10 @@ db_test = gym.make('HovorkaCambridge-v0')
 ## INITIALIZE HYPERPARAMETERS ##
 
 init_basal_optimal = 6.43
-eps_init = 1.0
-eps_end = 0.01
-eps_decay = 0.9955
-#epsilon = 0.1
+#eps_init = 1.0
+#eps_end = 0.01
+#eps_decay = 0.995
+epsilon = 0.3
 gamma = 0.99
 sigma = 1e-3
 
@@ -72,7 +75,7 @@ action_list = []
 state_space = db.observation_space.shape[0]
 action_space = db.action_space.n
 
-learning_rate = 0.001
+learning_rate = 0.1
 
 db.reset()
 
@@ -181,6 +184,26 @@ class OracleQ(nn.Module):
       def forward(self, x):
             fc1 = self.fc1(x)
             return self.fc2(fc1)
+      
+
+class Net(nn.Module):
+    """docstring for Net"""
+    def __init__(self):
+        super(Net, self).__init__()
+        self.fc1 = nn.Linear(state_space, 50)
+        self.fc1.weight.data.normal_(0,0.1)
+        self.fc2 = nn.Linear(50,30)
+        self.fc2.weight.data.normal_(0,0.1)
+        self.out = nn.Linear(30,action_space)
+        self.out.weight.data.normal_(0,0.1)
+
+    def forward(self,x):
+        fc1 = self.fc1(x)
+        y1 = F.relu(fc1)
+        fc2 = self.fc2(y1)
+        y2 = F.relu(fc2)
+        action_prob = self.out(y2)
+        return action_prob
 
 
 #%%
@@ -188,8 +211,14 @@ class OracleQ(nn.Module):
 #model = DQN(state_space, action_space)
 #model_target = DQN(state_space, action_space)
 
-model = OracleQ(state_space, action_space)
-model_target = OracleQ(state_space, action_space)
+#model = OracleQ(state_space, action_space)
+#model_target = OracleQ(state_space, action_space)
+
+#model = DeepNet(state_space, action_space)
+#model_target = DeepNet(state_space, action_space)
+
+model = Net()
+model_target = Net()
 
 loss = nn.MSELoss()
 optimizer = optim.Adam(params = model.parameters(), lr = learning_rate)
@@ -203,9 +232,7 @@ def choose_action(Q, epsilon):
             return db.action_space.sample()
       # Greedy action selection
       else:
-            
-            action = np.argmax(Q.detach().numpy())
-            return action
+            return np.argmax(Q.detach().numpy())
       
 # Learning function. Returns loss 
 def learn(batch_size, gamma):
@@ -346,6 +373,7 @@ def train(episodes, steps, epsilon, DDQ_learning):
             
             # Time step loop
             while t < steps:
+                  #db.render()
                   # Q values from local network, given current state
                   Q = model(th.from_numpy(state).float())
                   # Action selection
@@ -372,10 +400,12 @@ def train(episodes, steps, epsilon, DDQ_learning):
                         break
             
             # Update epsilon
-            epsilon = max(eps_end, eps_decay * epsilon)
+           # if epi % 5 == 0:
+                 # epsilon = max(eps_end, eps_decay * epsilon)
             
             # Update target network
-            target_update(model, model_target, sigma)
+            if epi % 10 == 0:
+                  target_update(model, model_target, sigma)
             
             # Save time steps, reward, loss and epsilon into lists
             step_list.append(t)
@@ -392,7 +422,7 @@ def train(episodes, steps, epsilon, DDQ_learning):
 
 #%%
 
-train(max_episodes, max_steps, eps_init, False)
+train(max_episodes, max_steps, epsilon, False)  
 
 
 #%%
@@ -434,16 +464,21 @@ model.load_state_dict(th.load(filepath))
 
 #%%
 
-db_test.reset();
+q_list = []
+r_list = []
+
 state = db_test.reset()
 model.eval()
 for i in range(72):
       q = model(th.from_numpy(state).float())
+      q_list.append(q)
       print(q)
       a = choose_action(q,0)
+      print(a)
       action_list.append(a)
       
-      s,r,d,i = db_test.step(a)
+      state,r,d,i = db_test.step(a)
+      r_list.append(r)
       
     
 
@@ -452,7 +487,18 @@ plt.title('Blood Glucose over Time')
 plt.xlabel('Time')
 plt.ylabel('Blood glucose')
 
+#%%
 
+state = db.reset()
+
+for i in range(72):
+      q = model(th.from_numpy(state).float())
+      print(q)
+      a = choose_action(q,0)
+      print(a)
+      state,r,d,i = db.step(a)
+      
+db.render()
 
 #%%
 #------------------------- 
